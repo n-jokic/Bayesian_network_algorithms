@@ -12,6 +12,7 @@ import network2tikz as n2tkz
 import scipy
 
 import os
+import itertools
 
 
 
@@ -32,6 +33,7 @@ class Bayesian_Network(object):
         self.network = network
         self.__current_index = 0
         self.__keys = list(self.network.keys())
+        self.__form_children()
         
         self.__format_cpds()
         
@@ -65,15 +67,16 @@ class Bayesian_Network(object):
         
         
     def __str__(self):
-        
+        temp = ""
         for var, node in self.network.items():
-              print(f"Variable: {var}")
-              print(f"Domain: {node['domain']}")
-              print(f"Parents: {node['parents']}")
-              print(f"CPD:\n{node['cpd']}")
-              print()  
-        
-        return ""
+                
+              temp += f"Variable: {var}\n"
+              temp += f"Domain: {node['domain']}\n"
+              temp += f"Parents: {node['parents']}\n"
+              temp += f"Children: {node['children']}\n"
+              temp += f"CPD:\n{node['cpd']}\n"
+              temp += "\n"
+        return temp[0:-1]
         
     def __iter__(self):
         return self
@@ -89,6 +92,17 @@ class Bayesian_Network(object):
             raise StopIteration
             
         
+    def __form_children(self):
+        for _, key1 in enumerate(self.network):
+            children = []
+            for _,key2 in enumerate(self.network):
+                
+                if key1 in self.network[key2]['parents']:
+                    children.append(key2)
+            self.network[key1]['children'] = children
+            
+            
+            
     def __form_bayesian_network(self, nodes, parents, domains, cpds):
         
         network_nodes = {}
@@ -112,7 +126,8 @@ class Bayesian_Network(object):
                 'name': node,
                 'domain': domain.split(),
                 'parents': par,
-                'cpd': probability_matrix
+                'cpd': probability_matrix,
+                'children' : []
             }
             network_nodes[node] = info
 
@@ -120,17 +135,16 @@ class Bayesian_Network(object):
     
     def __format_cpds(self):
         for node in self:
-            self.__contruct_lookup_table(node,-1, [], 0, {})
+            self.__contruct_lookup_table(node,-1, [0]*(len(node['parents'])+1), 0, {})
     
     def __contruct_lookup_table (self, node, idx, iterators, row, lookup_table):
         bn = self.network
         if (idx + 1 < len(node['parents'])):
             idx = idx + 1;
-            if idx == 0:
-                iterators = [0]*len(node['parents'])
+            
                 
             for symbol in bn[node['parents'][idx]]['domain']:
-                iterators[idx] = symbol
+                iterators[idx] = node['parents'][idx] + symbol
                 lookup_table, row = self.__contruct_lookup_table(node, idx, iterators, row, lookup_table)
                 
            
@@ -143,23 +157,32 @@ class Bayesian_Network(object):
         else:
             if (not len(node['parents']) == 0):
                 current_row = node['cpd'][row, :] 
-                lookup_table[tuple(iterators)] = {}
-            
+                total = 0
                 for idx, item in enumerate(current_row ):
-                    key =node['domain'][idx]
-                    lookup_table[tuple(iterators)][key] = item
-            
-            
+                    key = node['domain'][idx]
+                    iterators[-1] = node['name'] + key 
+                    lookup_table[tuple(iterators)]= round(item, 3)
+                    total+=item
+                    
+                key =node['domain'][idx + 1]
+                iterators[-1] = node['name'] + key
+                lookup_table[tuple(iterators)]= round(1-total, 3)
                 row = row+1;
                 
                 return lookup_table, row
             else:
                 row = 0
                 current_row = node['cpd'][row, :]
-                lookup_table[tuple([])] = {}
-                for idx, item in enumerate(current_row ):
+                total = 0
+                for idx, item in enumerate(current_row):
                     key =node['domain'][idx]
-                    lookup_table[tuple([])][key] = item
+                    iterators[-1] = node['name'] + key
+                    lookup_table[tuple(iterators)]= round(item, 3)
+                    total+=item
+                    
+                key =node['domain'][idx + 1]
+                iterators[-1] = node['name'] + key
+                lookup_table[tuple(iterators)]= round(1-total, 3)
                 self.network[node['name']]['cpd'] = lookup_table
         
     def getNetwork(self):
@@ -169,6 +192,161 @@ class Bayesian_Network(object):
     def getNode(self, node):
         return self.network[node]
     
+    def inference(self, X, e, algorithm):
+        
+        if algorithm == "elimination":
+            return self.__elimination(X, e)
+    def __factoring_complexity(self, V):
+        complexity = len(self.network[V]['domain'])
+        
+        for i in self.network[V]['parents']:
+            complexity*=len(self.network[i]['domain'])
+            
+        for i in self.network[V]['children']:
+            complexity*=len(self.network[i]['domain'])
+            
+        return complexity
+        
+        
+    def __elimination_ordering(self, variables):
+        smallest_domain = float('inf')
+        
+        variables.sort(key = lambda x : self.__factoring_complexity(x))
+           
+        return variables
+    
+            
+    def __update_parent_table(self, V, e):
+        parent_table = dict(self.network[V]['cpd'])
+        positions = {}
+        
+        set_parents = set(self.network[V]['parents'])  # Convert list b to a set for faster membership checking
+        for i, item in enumerate(e.keys()):
+            if item in set_parents:
+                positions[item] = i
+                
+        for key in positions:
+            for var in parent_table:
+                if e[key] != var[positions[key]]:
+                    del parent_table[key]
+                    
+        temp = list(self.network[V]['parents'])
+        parent_table['vars'] = temp.append(V)
+                    
+        return parent_table        
+  
+    def __update_children_table(self, V, e):
+        children_table = []
+        
+        for i in self.network[V]['children']:
+            
+            child_table = dict(self.network[i]['cpd'])
+            positions = {}
+        
+            set_parents = set(self.network[i]['parents'])  # Convert list b to a set for faster membership checking
+            for i, item in enumerate(e.keys()):
+                if item in set_parents:
+                    positions[item] = i
+                
+            for key in positions:
+                for var in child_table:
+                    if e[key] != var[positions[key]]:
+                        del child_table[key]
+                        
+            temp = list(self.network[i]['parents'])
+            children_table['vars'] = temp.append(i)
+            children_table.append(child_table)
+                    
+        return children_table 
+
+    
+    def __merge_tables(self, parent_table, children_table):
+        
+        merged_table = parent_table
+        if not children_table:
+            return merged_table
+        
+        
+        for child_table in children_table:
+            
+            set_merged = set(merged_table['vars']) 
+            set_child = set(child_table['vars'])
+            
+            new_vars = [i for i in set_merged.union(set_child)]
+            
+            locations_merged = {}
+            locations_child = {}
+            
+            for var in new_vars:
+                
+                if var in set_merged:
+                    locations_merged[var] = merged_table['vars'].index(var)
+                if var in set_child:
+                    locations_child[var] = child_table['vars'].index(var)
+                    
+                to_iter = [[var + value for value in self.network[var]['domain']] for var in new_vars]
+                
+                merged_key = [0]*len(set_merged)
+                child_key = [0]*len(set_child)
+                
+                new_merged = {}
+                for new_key in itertools.product(*to_iter):
+                    
+                    for field in new_key:
+                        if field[0] in set_merged:
+                            merged_key[locations_merged[field[0]]] = field
+                        if field[0] in set_child:
+                            child_key[locations_child[field[0]]] = field
+                            
+                    new_merged[new_key] = merged_table[merged_key]*child_table[child_key]
+                new_merged['vars'] = new_vars
+                merged_table = new_merged
+        return merged_table             
+                    
+                    
+                    
+                
+                
+          
+                
+                
+                   
+                   
+            
+            
+    
+    def __make_factor(self, V, e):
+        
+        parent_table = self.__update_parent_table(V, e)
+        children_table = self.__update_children_table(V, e)
+        
+        return self.__merge_tables(parent_table, children_table)
+
+    
+    def __sum_out(self, factors, V):
+        return
+    
+    def __normalization(self, factors):
+        return
+    def __pointwise_product(self, factors):
+        return
+    def __elimination(self, X, e):
+        variables = list(self.network.keys())
+        
+        hidden_var = set([i for i in variables if i not in e.keys() and i!=X])
+        factors = []
+        
+        for V in self.__elimination_ordering(variables):
+            
+            factors.append(self.__make_factor(V, e))
+            if V in hidden_var:
+                factors = self.__sum_out(factors, V)
+                break
+                
+        print(variables)
+        return self.__normalization(self.__pointwise_product(factors))
+            
+        
     
 
     
@@ -176,8 +354,7 @@ rel_path = 'Bayesian_Network.csv'
 
 bn = Bayesian_Network(rel_path)
 print(bn)
-for i in bn:
-    print(i)
+
 
 
 
