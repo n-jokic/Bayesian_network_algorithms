@@ -10,6 +10,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import network2tikz as n2tkz
 import scipy
+import random
 
 import os
 import itertools
@@ -224,6 +225,8 @@ class Bayesian_Network(object):
             return self.__rejection_sampling(kwargs['X'], kwargs['e'], kwargs['N'])
         if algorithm == "likelihood_weighting":
             return self.__likelihood_weighting(kwargs['X'], kwargs['e'], kwargs['N'])
+        if algorithm == "gibbs_sampling":
+            return self.__gibbs_sampling(kwargs['X'], kwargs['e'], kwargs['N'])
             
         
     def __factoring_complexity(self, V):
@@ -684,7 +687,6 @@ class Bayesian_Network(object):
                     if not self.__visited[child]:
                         to_be_sampled.append(child)
                
-                print(self.__sample_value)
             except ContinueI:
             
                 continue
@@ -693,6 +695,98 @@ class Bayesian_Network(object):
             self.__visited[key] = False
                 
         return self.__sample_value, w
+    
+    def __gibbs_sampling(self, X, e, N):
+        C = {}
+        to_iter = [[var + value for value in self.network[var]['domain']] for var in self.network]
+        
+        for Xs in itertools.product(*to_iter):
+            C[tuple(Xs)] = 0
+        
+        key = [*C][0]
+        positions_dic = {}
+        
+        for idx, field in enumerate(key):
+            for name in self.__keys:
+                if name == field[0]:
+                    positions_dic[name] = idx
+            
+        key = [0]*len(key)
+        
+        Z = []
+        for var in self.__keys:
+            if var not in e:
+                idx = int(np.floor(np.random.rand()*len(self.network[var]['domain'])))
+                value = var + self.network[var]['domain'][idx]
+                self.__sample_value[var] = value
+                Z.append(var)
+            else:
+                self.__sample_value[var] = e[var]
+                
+                
+        for k in range(N):
+            z = random.choice(Z)
+            self.__sample_value[z] = self.__markov_blanket_sample(z)
+            
+            for var in self.__sample_value:
+                key[positions_dic[var]] = self.__sample_value[var]
+            
+            C[tuple(key)] += 1
+            
+            
+
+
+            
+
+        return self.__normalize_sample(C, X, e)
+    
+    def __markov_blanket_sample(self, z):
+        
+        chilren_table = []
+        
+        current_table = self.network[z]['cpd']
+        key = [*current_table][0]
+        new_key = [0]*len(key)
+        
+        for idx,field in enumerate(key):
+            new_key[idx] = self.__sample_value[field[0]]
+            
+        prob_dic = {}
+        for value in self.network[z]['domain']:
+            new_key[-1] = z + value
+            prob_dic[tuple([new_key[-1]])] = current_table[tuple(new_key)]
+        
+        for child in self.network[z]['children']:
+            child_table = self.network[child]['cpd']
+            key = [*child_table][0]
+            new_key = [0]*len(key)
+            
+            pos_z = 0
+            for idx,field in enumerate(key):
+                new_key[idx] = self.__sample_value[field[0]]
+                if field[0] == z:
+                    pos_z = idx
+                    
+            child_prob_dic = {}
+            for value in self.network[z]['domain']:
+                new_key[pos_z] = z + value
+                child_prob_dic[tuple([new_key[pos_z]])] = child_table[tuple(new_key)]
+            child_prob_dic['vars'] = z
+            chilren_table.append(child_prob_dic)
+            
+        prob_dic['vars'] = z
+        merged = self.__merge_tables(prob_dic, chilren_table, {})    
+        del merged['vars']
+        prob = np.random.rand()
+        prob_keys = [*merged]
+        prob_keys.sort(key = lambda x : merged[x])
+        cdf = 0
+        for key in prob_keys:
+            cdf+=prob_dic[key]
+            if prob < cdf:
+                self.__sample_value[z] = key[-1]
+                break
+        return self.__sample_value[z]
         
 
     
@@ -703,7 +797,7 @@ rel_path = 'Bayesian_Network.csv'
 bn = Bayesian_Network(rel_path)
 print(bn)
 
-print(bn.inference( X = 'E', e = {'F': 'F+'}, algorithm = "likelihood_weighting", N = 1000))
+print(bn.inference( X = 'E', e = {'F': 'F+'}, algorithm = "gibbs_sampling", N = 1000))
 
 
 
