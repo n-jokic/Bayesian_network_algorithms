@@ -14,6 +14,11 @@ import scipy
 import os
 import itertools
 
+class ContinueI(Exception):
+    pass
+
+
+continue_i = ContinueI()
 
 
 class Bayesian_Network(object):
@@ -33,6 +38,9 @@ class Bayesian_Network(object):
         self.network = network
         self.__current_index = 0
         self.__keys = list(self.network.keys())
+        self.__visited = {}
+        for key in self.__keys:
+            self.__visited[key] = False
         self.__form_children()
         
         self.__format_cpds()
@@ -209,7 +217,6 @@ class Bayesian_Network(object):
         
         
     def __elimination_ordering(self, variables):
-        smallest_domain = float('inf')
         
         variables.sort(key = lambda x : self.__factoring_complexity(x))
            
@@ -219,19 +226,29 @@ class Bayesian_Network(object):
     def __update_parent_table(self, V, e):
         parent_table = dict(self.network[V]['cpd'])
         positions = {}
+        if self.__visited[V] == True:
+            return {}
+        
         
         set_parents = set(self.network[V]['parents'])  # Convert list b to a set for faster membership checking
         for i, item in enumerate(e.keys()):
             if item in set_parents:
-                positions[item] = i
+                positions[item] = self.network[V]['parents'].index(item)
                 
         for key in positions:
-            for var in parent_table:
+            for var in tuple(parent_table):
                 if e[key] != var[positions[key]]:
-                    del parent_table[key]
-                    
+                    del parent_table[var]
+        
+        if V in e:
+            for var in tuple(parent_table):
+                if e[V] != var[-1]:
+                    del parent_table[var]
         temp = list(self.network[V]['parents'])
-        parent_table['vars'] = temp.append(V)
+        if not temp:
+            temp = []
+        temp.append(V)
+        parent_table['vars'] = temp
                     
         return parent_table        
   
@@ -239,6 +256,10 @@ class Bayesian_Network(object):
         children_table = []
         
         for i in self.network[V]['children']:
+            ch = i
+            if self.__visited[ch] == True:
+                continue
+            
             
             child_table = dict(self.network[i]['cpd'])
             positions = {}
@@ -246,21 +267,30 @@ class Bayesian_Network(object):
             set_parents = set(self.network[i]['parents'])  # Convert list b to a set for faster membership checking
             for i, item in enumerate(e.keys()):
                 if item in set_parents:
-                    positions[item] = i
+                    positions[item] = self.network[ch]['parents'].index(item)
+            if ch in e:
+                if ch in self.network['parents']:
+                    positions[ch] = self.network['parents'].index(ch)
+                else:
+                    positions[ch] = - 1
                 
             for key in positions:
-                for var in child_table:
+                for var in tuple(child_table):
                     if e[key] != var[positions[key]]:
-                        del child_table[key]
+                        del child_table[var]
                         
-            temp = list(self.network[i]['parents'])
-            children_table['vars'] = temp.append(i)
+            temp = list(self.network[ch]['parents'])
+            if not temp:
+                temp = []
+            temp.append(ch)
+            child_table['vars'] = temp
             children_table.append(child_table)
+            self.__visited[ch] = True
                     
         return children_table 
 
     
-    def __merge_tables(self, parent_table, children_table):
+    def __merge_tables(self, parent_table, children_table, e):
         
         merged_table = parent_table
         if not children_table:
@@ -284,52 +314,117 @@ class Bayesian_Network(object):
                 if var in set_child:
                     locations_child[var] = child_table['vars'].index(var)
                     
-                to_iter = [[var + value for value in self.network[var]['domain']] for var in new_vars]
+            to_iter = [[var + value for value in self.network[var]['domain']] for var in new_vars]
                 
-                merged_key = [0]*len(set_merged)
-                child_key = [0]*len(set_child)
+            merged_key = [0]*len(set_merged)
+            child_key = [0]*len(set_child)
                 
-                new_merged = {}
-                for new_key in itertools.product(*to_iter):
-                    
+            new_merged = {}
+            for new_key in itertools.product(*to_iter):
+                try:
                     for field in new_key:
                         if field[0] in set_merged:
                             merged_key[locations_merged[field[0]]] = field
                         if field[0] in set_child:
                             child_key[locations_child[field[0]]] = field
+                        if field[0] in e:
+                            if field != e[field[0]]:
+                                raise continue_i
                             
-                    new_merged[new_key] = merged_table[merged_key]*child_table[child_key]
-                new_merged['vars'] = new_vars
-                merged_table = new_merged
+                    new_merged[new_key] = merged_table[tuple(merged_key)]*child_table[tuple(child_key)]
+                except ContinueI:
+                    continue
+
+                
+            new_merged['vars'] = new_vars
+            merged_table = new_merged
+            
+        
         return merged_table             
                     
-                    
-                    
-                
-                
-          
-                
-                
-                   
-                   
-            
-            
     
     def __make_factor(self, V, e):
         
         parent_table = self.__update_parent_table(V, e)
         children_table = self.__update_children_table(V, e)
         
-        return self.__merge_tables(parent_table, children_table)
+        return self.__merge_tables(parent_table, children_table, e)
 
     
-    def __sum_out(self, factors, V):
-        return
+    def __sum_out(self, factors, V, e):
+        
+        to_be_merged = []
+        others = []
+        for factor in factors:
+            if V in factor['vars']:
+                to_be_merged.append(factor)
+            else: 
+                others.append(factor)
+        if len(to_be_merged) > 1:
+            merged = self.__merge_tables(to_be_merged[0], to_be_merged[1:], e)
+        else:
+            merged = to_be_merged[0]
+            
+        new_vars = set(merged['vars']) - set(V)
+        
+        locations = {}
+        for var in new_vars:
+            locations[var] = merged['vars'].index(var)
+        locations[V] = merged['vars'].index(V)
+        
+        to_iter = [[var + value for value in self.network[var]['domain']] for var in new_vars]
+        
+        new_merged = {}
+        
+        key = [0]*(len(new_vars) + 1)
+        for value_V in self.network[V]['domain']:
+            for new_key in itertools.product(*to_iter):
+                try:
+                    for field in new_key:
+                        key[locations[field[0]]] = field
+                        if field[0] in e:
+                            if field!= e[field[0]]:
+                                raise continue_i
+                    key[locations[V]] = V + value_V   
+                    
+                    
+                    
+                    if new_key in new_merged:
+                        new_merged[new_key] += merged[tuple(key)]
+                    else:
+                        new_merged[new_key] = merged[tuple(key)]
+                except ContinueI:
+                    continue
+                        
+               
+            
+        new_merged['vars'] = list(new_vars)
+        others.append(new_merged)
+        return others
     
-    def __normalization(self, factors):
-        return
-    def __pointwise_product(self, factors):
-        return
+    def __normal(self, final_table):
+        total_prob = 0
+        for key in final_table:
+            if key == 'vars':
+                continue
+            total_prob += final_table[key]
+            
+        for key in final_table:
+            if key == 'vars':
+                continue
+            final_table[key] = final_table[key]/total_prob
+            
+            
+        return final_table
+    
+    def __pointwise_product(self, factors, e):
+        if len(factors) > 1:
+            product = self.__merge_tables(factors[0], factors[1:], e)
+        else:
+            product = factors[0]
+            
+        return product
+    
     def __elimination(self, X, e):
         variables = list(self.network.keys())
         
@@ -337,14 +432,26 @@ class Bayesian_Network(object):
         factors = []
         
         for V in self.__elimination_ordering(variables):
-            
-            factors.append(self.__make_factor(V, e))
+            print(V)
+            factor = self.__make_factor(V, e)
+            if factor:
+                factors.append(factor)
             if V in hidden_var:
-                factors = self.__sum_out(factors, V)
-                break
+                factors = self.__sum_out(factors, V, e)
+            print(factors)
+            self.__visited[V] = True
+            #print(self.__visited)
+            
                 
-        print(variables)
-        return self.__normalization(self.__pointwise_product(factors))
+        #print(variables)
+        #self.__visited = {}
+        for key in self.__keys:
+            self.__visited[key] = False
+        #print(factors)
+        self.__pointwise_product(factors, e)
+        final_table = self.__normal(self.__pointwise_product(factors, e))
+        del final_table['vars']
+        return final_table
             
         
     
@@ -355,6 +462,7 @@ rel_path = 'Bayesian_Network.csv'
 bn = Bayesian_Network(rel_path)
 print(bn)
 
+print(bn.inference( 'E', {'F': 'F+', 'A':'A+'}, "elimination"))
 
 
 
