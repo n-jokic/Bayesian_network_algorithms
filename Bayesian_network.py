@@ -13,6 +13,7 @@ import scipy
 
 import os
 import itertools
+from collections import deque
 
 class ContinueI(Exception):
     pass
@@ -42,8 +43,23 @@ class Bayesian_Network(object):
         for key in self.__keys:
             self.__visited[key] = False
         self.__form_children()
-        
+        self.__find_root_vars()
+        self.__sample_value = {}
+        for key in self.__keys:
+            self.__sample_value[key] = -1
         self.__format_cpds()
+        
+    def __len__(self):
+        return len(self.__keys)
+    
+    def __find_root_vars(self):
+        root = []
+        for key in self.__keys:
+            if len(self.network[key]['parents'])== 0:
+                root.append(key)
+        self.__root = root
+        return
+        
         
     def draw_network(self):
         # Create an empty directed graph
@@ -200,10 +216,16 @@ class Bayesian_Network(object):
     def getNode(self, node):
         return self.network[node]
     
-    def inference(self, X, e, algorithm):
-        
+    def inference(self, **kwargs):
+        algorithm = kwargs['algorithm']
         if algorithm == "elimination":
-            return self.__elimination(X, e)
+            return self.__elimination(kwargs['X'], kwargs['e'])
+        if algorithm == "rejection_sampling":
+            return self.__rejection_sampling(kwargs['X'], kwargs['e'], kwargs['N'])
+        if algorithm == "likelihood_weighting":
+            return self.__likelihood_weighting(kwargs['X'], kwargs['e'], kwargs['N'])
+            
+        
     def __factoring_complexity(self, V):
         complexity = len(self.network[V]['domain'])
         
@@ -412,7 +434,7 @@ class Bayesian_Network(object):
         for key in final_table:
             if key == 'vars':
                 continue
-            final_table[key] = final_table[key]/total_prob
+            final_table[key] = round(final_table[key]/total_prob, 5)
             
             
         return final_table
@@ -430,15 +452,17 @@ class Bayesian_Network(object):
         
         hidden_var = set([i for i in variables if i not in e.keys() and i!=X])
         factors = []
+        ordering = self.__elimination_ordering(variables)
+        ordering = ['G', 'C', 'F', 'D', 'B', 'A']
         
-        for V in self.__elimination_ordering(variables):
-            print(V)
+        for V in ordering:
+            #print(V)
             factor = self.__make_factor(V, e)
             if factor:
                 factors.append(factor)
             if V in hidden_var:
                 factors = self.__sum_out(factors, V, e)
-            print(factors)
+            #print(factors)
             self.__visited[V] = True
             #print(self.__visited)
             
@@ -452,8 +476,225 @@ class Bayesian_Network(object):
         final_table = self.__normal(self.__pointwise_product(factors, e))
         del final_table['vars']
         return final_table
-            
+    
+    def __rejection_sampling(self, X, e, N):
+        C = {}
+        to_iter = [[var + value for value in self.network[var]['domain']] for var in self.network]
         
+        for Xs in itertools.product(*to_iter):
+            C[tuple(Xs)] = 0
+        
+        key = [*C][0]
+        positions_dic = {}
+        
+        for idx, field in enumerate(key):
+            for name in self.__keys:
+                if name == field[0]:
+                    positions_dic[name] = idx
+            
+        key = [0]*len(key)
+        
+        for j in range(N):
+            x = self.__sample()
+            if self.__is_consistent(x, e):
+                
+                for var in x:
+                    key[positions_dic[var]] = x[var]
+                
+                C[tuple(key)] += 1
+  
+    
+        return self.__normalize_sample(C, X, e)
+    
+    def __sample(self):
+        to_be_sampled = deque(self.__root)
+        
+        while to_be_sampled:
+            try:
+                x = to_be_sampled.popleft()
+                
+                current_table = self.network[x]['cpd']
+                key = [*current_table][0]
+                new_key = [0]*len(key)
+                
+                for idx, field in enumerate(key):
+                    if field[0] == x:
+                        continue
+                    if not self.__visited[field[0]]:
+                        to_be_sampled.append(x)
+                        raise continue_i
+                    else:
+                        new_key[idx] = self.__sample_value[field[0]]
+                
+                prob = np.random.rand()
+                prob_dic = {}
+                
+                
+                for value in self.network[x]['domain']:
+                    new_key[-1] = x + value
+                    prob_dic[tuple(new_key)] = current_table[tuple(new_key)]
+                    
+                prob_keys = [*prob_dic]
+                prob_keys.sort(key = lambda x : prob_dic[x])
+                cdf = 0
+                for key in prob_keys:
+                    cdf+=prob_dic[key]
+                    if prob < cdf:
+                        self.__sample_value[x] =key[-1]
+                        break
+
+                self.__visited[x] = True #Sample generated
+                
+                for child in self.network[x]['children']:
+                    if not self.__visited[child]:
+                        to_be_sampled.append(child)
+               
+            except ContinueI:
+                print( self.__visited)
+                continue
+            
+            
+        for key in self.__keys:
+            self.__visited[key] = False
+                
+        return self.__sample_value
+    def __is_consistent(self, x, e):
+        for var in e:
+            if x[var] != e[var]:
+                return False
+        return True
+    def __normalize_sample(self, sample, X, e):
+        
+        key = [*sample][0]
+        x_position = 0;
+        e_position = [0]*len(e)
+        
+        for idx, item in enumerate(key):
+            if item[0] == X:
+                x_position = idx
+            for idy, i in enumerate(e):
+                if item[0] == i:
+                    e_position[idy] = idx
+        
+        final_dict = {}
+        e_val = [e[i] for i in e]
+        for value in self.network[X]['domain']:
+            
+            final_dict[tuple([*e_val, X + value])] = 0
+            
+        e_keys = [*e]
+        new_key = [0]*(len(e_position)+1)
+        for key in sample:
+            try:
+                for idy, idx in enumerate(e_position):
+                    new_key[idy] = key[idx]
+                    if key[idx] != e[e_keys[idy]]:
+                        raise continue_i
+                new_key[-1] = key[x_position]
+                
+                final_dict[tuple(new_key)] += sample[key]
+            except ContinueI:
+                continue
+            
+        total_prob = 0
+        for key in final_dict:
+            total_prob+=final_dict[key]
+        
+        if total_prob != 0:
+            for key in final_dict:
+                final_dict[key] = round(final_dict[key]/total_prob, 5)
+            
+        return final_dict
+    
+    def __likelihood_weighting(self, X, e, N):
+        
+        W = {}
+        to_iter = [[var + value for value in self.network[var]['domain']] for var in self.network]
+        
+        for Xs in itertools.product(*to_iter):
+            W[tuple(Xs)] = 0
+        
+        key = [*W][0]
+        positions_dic = {}
+        
+        for idx, field in enumerate(key):
+            for name in self.__keys:
+                if name == field[0]:
+                    positions_dic[name] = idx
+            
+        key = [0]*len(key)
+        
+        for j in range(N):
+            x, w = self.__weighted_sample(e)
+            
+            for var in x:
+                key[positions_dic[var]] = x[var]
+            
+            W[tuple(key)] += w
+            
+        return self.__normalize_sample(W, X, e)
+        
+    def __weighted_sample(self, e):
+        to_be_sampled = deque(self.__root)
+        w = 1
+        while to_be_sampled:
+            try:
+                x = to_be_sampled.popleft()
+                    
+                current_table = self.network[x]['cpd']
+                key = [*current_table][0]
+                new_key = [0]*len(key)
+                
+                for idx, field in enumerate(key):
+                    if field[0] == x:
+                        continue
+                    if not self.__visited[field[0]]:
+                        to_be_sampled.append(x)
+                        raise continue_i
+                    else:
+                        new_key[idx] = self.__sample_value[field[0]]
+                        
+                if x in e:
+                    new_key[-1] = e[x]
+                    self.__visited[x] = True
+                    self.__sample_value[x] = e[x]
+                    w = w*current_table[tuple(new_key)]
+                    raise continue_i
+                
+                prob = np.random.rand()
+                prob_dic = {}
+                
+                
+                for value in self.network[x]['domain']:
+                    new_key[-1] = x + value
+                    prob_dic[tuple(new_key)] = current_table[tuple(new_key)]
+                    
+                prob_keys = [*prob_dic]
+                prob_keys.sort(key = lambda x : prob_dic[x])
+                cdf = 0
+                for key in prob_keys:
+                    cdf+=prob_dic[key]
+                    if prob < cdf:
+                        self.__sample_value[x] =key[-1]
+                        break
+
+                self.__visited[x] = True #Sample generated
+                
+                for child in self.network[x]['children']:
+                    if not self.__visited[child]:
+                        to_be_sampled.append(child)
+               
+                print(self.__sample_value)
+            except ContinueI:
+            
+                continue
+            
+        for key in self.__keys:
+            self.__visited[key] = False
+                
+        return self.__sample_value, w
+        
+
     
 
     
@@ -462,7 +703,7 @@ rel_path = 'Bayesian_Network.csv'
 bn = Bayesian_Network(rel_path)
 print(bn)
 
-print(bn.inference( 'E', {'F': 'F+', 'A':'A+'}, "elimination"))
+print(bn.inference( X = 'E', e = {'F': 'F+'}, algorithm = "likelihood_weighting", N = 1000))
 
 
 
