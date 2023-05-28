@@ -28,7 +28,7 @@ class Bayesian_Network(object):
     
     def __init__(self, relative_path):
         script_dir = os.path.dirname(__file__) #<-- absolute dir the script is in
-        abs_file_path = os.path.join(script_dir, rel_path)
+        abs_file_path = os.path.join(script_dir, relative_path)
         data = pd.read_csv(abs_file_path)
         
         nodes = [i for i in data['variable']]
@@ -723,15 +723,19 @@ class Bayesian_Network(object):
             else:
                 self.__sample_value[var] = e[var]
                 
-                
-        for k in range(N):
+        k = 0
+        while k < N:
             z = random.choice(Z)
-            self.__sample_value[z] = self.__markov_blanket_sample(z)
+            self.__sample_value[z], P  = self.__markov_blanket_sample(z)
             
             for var in self.__sample_value:
                 key[positions_dic[var]] = self.__sample_value[var]
-            
-            C[tuple(key)] += 1
+                
+            if P < 1e-3:
+                continue
+            else:
+                C[tuple(key)] += 1
+                k = k + 1
             
             
 
@@ -785,19 +789,10 @@ class Bayesian_Network(object):
             cdf+=prob_dic[key]
             if prob < cdf:
                 self.__sample_value[z] = key[-1]
+                P = merged[key]
                 break
-        return self.__sample_value[z]
+        return self.__sample_value[z], P
         
-
-    
-
-    
-rel_path = 'Bayesian_Network.csv'
-
-bn = Bayesian_Network(rel_path)
-print(bn)
-
-print(bn.inference( X = 'E', e = {'F': 'F+'}, algorithm = "gibbs_sampling", N = 1000))
 
 
 
