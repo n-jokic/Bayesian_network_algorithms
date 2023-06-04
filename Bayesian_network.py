@@ -226,7 +226,7 @@ class Bayesian_Network(object):
         if algorithm == "likelihood_weighting":
             return self.__likelihood_weighting(kwargs['X'], kwargs['e'], kwargs['N'])
         if algorithm == "gibbs_sampling":
-            return self.__gibbs_sampling(kwargs['X'], kwargs['e'], kwargs['N'])
+            return self.__gibbs_sampling(kwargs['X'], kwargs['e'], kwargs['N'], kwargs['burn_in'])
             
         
     def __factoring_complexity(self, V):
@@ -456,55 +456,38 @@ class Bayesian_Network(object):
         hidden_var = set([i for i in variables if i not in e.keys() and i!=X])
         factors = []
         ordering = self.__elimination_ordering(variables)
-        ordering = ['G', 'C', 'F', 'D', 'B', 'A']
         
         for V in ordering:
-            #print(V)
+            
             factor = self.__make_factor(V, e)
             if factor:
                 factors.append(factor)
             if V in hidden_var:
                 factors = self.__sum_out(factors, V, e)
-            #print(factors)
             self.__visited[V] = True
-            #print(self.__visited)
-            
-                
-        #print(variables)
-        #self.__visited = {}
+
+
         for key in self.__keys:
             self.__visited[key] = False
-        #print(factors)
-        self.__pointwise_product(factors, e)
+
         final_table = self.__normal(self.__pointwise_product(factors, e))
         del final_table['vars']
         return final_table
     
     def __rejection_sampling(self, X, e, N):
         C = {}
-        to_iter = [[var + value for value in self.network[var]['domain']] for var in self.network]
+        to_iter = [X + value for value in self.network[X]['domain']]
+        evidence = [e[key] for key in e]
         
-        for Xs in itertools.product(*to_iter):
-            C[tuple(Xs)] = 0
-        
-        key = [*C][0]
-        positions_dic = {}
-        
-        for idx, field in enumerate(key):
-            for name in self.__keys:
-                if name == field[0]:
-                    positions_dic[name] = idx
-            
-        key = [0]*len(key)
-        
-        for j in range(N):
+        for Xs in to_iter:
+            C[tuple([Xs, *evidence])] = 0
+
+        j = 0
+        while j < N:
             x = self.__sample()
             if self.__is_consistent(x, e):
-                
-                for var in x:
-                    key[positions_dic[var]] = x[var]
-                
-                C[tuple(key)] += 1
+                C[tuple([x[X], *evidence])] += 1
+            j += 1
   
     
         return self.__normalize_sample(C, X, e)
@@ -612,28 +595,14 @@ class Bayesian_Network(object):
     def __likelihood_weighting(self, X, e, N):
         
         W = {}
-        to_iter = [[var + value for value in self.network[var]['domain']] for var in self.network]
-        
-        for Xs in itertools.product(*to_iter):
-            W[tuple(Xs)] = 0
-        
-        key = [*W][0]
-        positions_dic = {}
-        
-        for idx, field in enumerate(key):
-            for name in self.__keys:
-                if name == field[0]:
-                    positions_dic[name] = idx
-            
-        key = [0]*len(key)
-        
+        to_iter = [X + value for value in self.network[X]['domain']]
+        evidence = [e[key] for key in e]
+        for Xs in to_iter:
+            W[tuple([Xs, *evidence])] = 0
+
         for j in range(N):
             x, w = self.__weighted_sample(e)
-            
-            for var in x:
-                key[positions_dic[var]] = x[var]
-            
-            W[tuple(key)] += w
+            W[tuple([x[X], *evidence])] += w
             
         return self.__normalize_sample(W, X, e)
         
@@ -643,6 +612,8 @@ class Bayesian_Network(object):
         while to_be_sampled:
             try:
                 x = to_be_sampled.popleft()
+                if self.__visited[x]:
+                    raise continue_i
                     
                 current_table = self.network[x]['cpd']
                 key = [*current_table][0]
@@ -662,6 +633,11 @@ class Bayesian_Network(object):
                     self.__visited[x] = True
                     self.__sample_value[x] = e[x]
                     w = w*current_table[tuple(new_key)]
+                    
+                    for child in self.network[x]['children']:
+                        if not self.__visited[child]:
+                            to_be_sampled.append(child)
+                    
                     raise continue_i
                 
                 prob = np.random.rand()
@@ -682,6 +658,7 @@ class Bayesian_Network(object):
                         break
 
                 self.__visited[x] = True #Sample generated
+                #print(self.__visited)
                 
                 for child in self.network[x]['children']:
                     if not self.__visited[child]:
@@ -696,45 +673,40 @@ class Bayesian_Network(object):
                 
         return self.__sample_value, w
     
-    def __gibbs_sampling(self, X, e, N):
+    def __gibbs_sampling(self, X, e, N, burn_in):
+        mixing_time = burn_in
+        
         C = {}
-        to_iter = [[var + value for value in self.network[var]['domain']] for var in self.network]
+        to_iter = [X + value for value in self.network[X]['domain']]
+        evidence = [e[key] for key in e]
         
-        for Xs in itertools.product(*to_iter):
-            C[tuple(Xs)] = 0
+        for Xs in to_iter:
+            C[tuple([Xs, *evidence])] = 0
         
-        key = [*C][0]
-        positions_dic = {}
-        
-        for idx, field in enumerate(key):
-            for name in self.__keys:
-                if name == field[0]:
-                    positions_dic[name] = idx
-            
-        key = [0]*len(key)
-        
-        Z = []
+        Z = {}
         for var in self.__keys:
             if var not in e:
                 idx = int(np.floor(np.random.rand()*len(self.network[var]['domain'])))
                 value = var + self.network[var]['domain'][idx]
                 self.__sample_value[var] = value
-                Z.append(var)
+                Z[var] = 0
             else:
                 self.__sample_value[var] = e[var]
                 
         k = 0
-        while k < N:
-            z = random.choice(Z)
-            self.__sample_value[z], P  = self.__markov_blanket_sample(z)
+        while k < N + mixing_time:
+            temp_Z = dict(Z)
             
-            for var in self.__sample_value:
-                key[positions_dic[var]] = self.__sample_value[var]
+            while temp_Z:
+                z = random.choice([*temp_Z ])
+                del temp_Z[z]
+                self.__sample_value[z], P  = self.__markov_blanket_sample(z)
                 
-            if P < 1e-3:
-                continue
+
+            if k < mixing_time:
+                k = k + 1
             else:
-                C[tuple(key)] += 1
+                C[tuple([self.__sample_value[X], *evidence])] += 1
                 k = k + 1
             
             
@@ -781,12 +753,19 @@ class Bayesian_Network(object):
         prob_dic['vars'] = z
         merged = self.__merge_tables(prob_dic, chilren_table, {})    
         del merged['vars']
+        
+        total_prob = 0
+        for key in merged:
+            total_prob+= merged[key]
+        for key in merged:
+            merged[key] = merged[key]/total_prob
+            
         prob = np.random.rand()
         prob_keys = [*merged]
         prob_keys.sort(key = lambda x : merged[x])
         cdf = 0
         for key in prob_keys:
-            cdf+=prob_dic[key]
+            cdf+=merged[key]
             if prob < cdf:
                 self.__sample_value[z] = key[-1]
                 P = merged[key]
